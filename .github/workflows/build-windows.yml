@@ -1,0 +1,45 @@
+# Builds dist\NetSwitch.exe on a Windows runner (same steps as build_windows.bat).
+# Every push: the exe is available as a downloadable artifact of the run.
+# Pushing a tag like v0.1.0: the exe is also attached to a GitHub release.
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to create releases for tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install -e .[dev]
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Build exe
+        run: pyinstaller --noconfirm --onefile --windowed --uac-admin --name NetSwitch run_netswitch.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NetSwitch-windows
+          path: dist/NetSwitch.exe
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NetSwitch.exe
