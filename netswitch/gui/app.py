@@ -9,8 +9,8 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
-    QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QSystemTrayIcon, QVBoxLayout,
+    QApplication, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QSystemTrayIcon, QVBoxLayout,
     QWidget,
 )
 
@@ -58,6 +58,11 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._really_quit = False
         self._tray_hint_shown = False
+        # adapter -> ids of profiles matching its current settings (empty until detected)
+        self.active: dict[str, set[str]] = {}
+        self._switches = 0  # bumped on every switch so stale detections are dropped
+        # (settings before the last switch, adapter, last_applied before, active ids before)
+        self._undo: tuple[Profile, str, str | None, set[str]] | None = None
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(make_icon())
@@ -80,6 +85,9 @@ class MainWindow(QMainWindow):
         self.apply_btn.setFont(f)
         self.apply_btn.setMinimumHeight(34)
         self.apply_btn.clicked.connect(self.apply_selected)
+        self.undo_btn = QPushButton("Undo last switch")
+        self.undo_btn.setEnabled(False)
+        self.undo_btn.clicked.connect(self.undo_last)
 
         buttons = QHBoxLayout()
         for text, slot in (
@@ -116,6 +124,7 @@ class MainWindow(QMainWindow):
         rv.setContentsMargins(0, 0, 0, 0)
         rv.addWidget(self.details, 1)
         rv.addWidget(self.apply_btn)
+        rv.addWidget(self.undo_btn)
         rv.addWidget(self.log, 1)
 
         splitter = QSplitter()
@@ -154,6 +163,9 @@ class MainWindow(QMainWindow):
         self._action(m, "De&lete", self.delete_selected, QKeySequence.Delete)
         m.addSeparator()
         self._action(m, "&Activate", self.apply_selected, QKeySequence("Ctrl+Return"))
+        self._action(m, "Activate &on…", self.apply_selected_on)
+        self.undo_action = self._action(m, "&Undo last switch", self.undo_last, QKeySequence.Undo)
+        self.undo_action.setEnabled(False)
         self._action(m, "Show &commands (preview)", self.preview_selected)
         m.addSeparator()
         self._action(m, "&Refresh adapters", self.refresh_adapters, QKeySequence.Refresh)
@@ -194,19 +206,21 @@ class MainWindow(QMainWindow):
         m.clear()
         header = m.addAction("Switch profile")
         header.setEnabled(False)
+        active = self._active_ids()
         for p in self.store.profiles:
             a = m.addAction(p.name)
             a.setCheckable(True)
-            a.setChecked(p.id == self.store.last_applied)
+            a.setChecked(p.id in active)
             a.setEnabled(not self._busy)
             a.triggered.connect(lambda _=False, pid=p.id: self.apply_profile(self.store.get(pid)))
         if not self.store.profiles:
             m.addAction("(no profiles)").setEnabled(False)
         m.addSeparator()
+        m.addAction("Undo last switch", self.undo_last).setEnabled(self._undo is not None and not self._busy)
         m.addAction("Show window", self.show_window)
         m.addAction("Quit", self.quit)
-        active = self.store.get(self.store.last_applied or "")
-        self.tray.setToolTip(f"{APP_NAME} – {active.name}" if active else APP_NAME)
+        names = [p.name for p in self.store.profiles if p.id in active]
+        self.tray.setToolTip(f"{APP_NAME} – {', '.join(names)}" if names else APP_NAME)
 
     def _update_status(self):
         if sys.platform == "win32" and not is_admin():
@@ -225,11 +239,12 @@ class MainWindow(QMainWindow):
         self.list.clear()
         active_icon = make_icon("#2ea043")
         idle_icon = make_icon("#8b949e")
+        active = self._active_ids()
         for i, p in enumerate(self.store.profiles):
             prefix = f"{i + 1}. " if i < 9 else "    "
             item = QListWidgetItem(f"{prefix}{p.name}\n      {p.summary()}")
             item.setData(Qt.UserRole, p.id)
-            item.setIcon(active_icon if p.id == self.store.last_applied else idle_icon)
+            item.setIcon(active_icon if p.id in active else idle_icon)
             item.setToolTip(p.notes or p.summary())
             self.list.addItem(item)
             if p.id == current:
@@ -249,6 +264,12 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QTimer
 
         QTimer.singleShot(0, self.refresh_list)
+
+    def _active_ids(self) -> set[str]:
+        """Profiles matching the adapters' current settings; the last applied one until detected."""
+        if not self.active:
+            return {self.store.last_applied} if self.store.last_applied else set()
+        return set().union(*self.active.values())
 
     def _selected_id(self) -> str | None:
         item = self.list.currentItem()
@@ -275,7 +296,7 @@ class MainWindow(QMainWindow):
         if p.notes:
             rows.append(("Notes", p.notes.replace("\n", "<br>")))
         body = "".join(f"<tr><td style='padding-right:12px;color:gray'>{k}</td><td>{v}</td></tr>" for k, v in rows)
-        active = " <span style='color:#2ea043'>● active</span>" if p.id == self.store.last_applied else ""
+        active = " <span style='color:#2ea043'>● active</span>" if p.id in self._active_ids() else ""
         self.details.setText(f"<h3>{p.name}{active}</h3><table>{body}</table>")
 
     def _context_menu(self, pos):
@@ -283,6 +304,10 @@ class MainWindow(QMainWindow):
             return
         m = QMenu(self)
         m.addAction("Activate", self.apply_selected)
+        on = m.addMenu("Activate on")
+        for a in self.adapters:
+            on.addAction(a.label, lambda _=False, name=a.name: self.apply_profile(self._selected(), name))
+        on.setEnabled(bool(self.adapters))
         m.addAction("Edit", self.edit_selected)
         m.addAction("Duplicate", self.duplicate_selected)
         m.addAction("Export…", self.export_selected)
@@ -297,9 +322,47 @@ class MainWindow(QMainWindow):
         def done(adapters):
             self.adapters = adapters
             self.log_line(f"Found {len(adapters)} adapter(s): " + ", ".join(a.name for a in adapters))
+            self.detect_active()
 
         run_async(self.backend.list_adapters, on_done=done,
                   on_error=lambda msg: self.log_line(f"Could not list adapters: {msg}"))
+
+    def detect_active(self):
+        """Mark the profiles whose settings match what the adapters currently use."""
+        known = {a.name for a in self.adapters}
+        names = sorted({p.adapter for p in self.store.profiles if p.adapter in known})
+        switches = self._switches
+
+        def read_all():
+            current = {}
+            for name in names:
+                try:
+                    current[name] = self.backend.read_config(name)
+                except Exception:  # noqa: BLE001 - an unreadable adapter just stays unmarked
+                    pass
+            return current
+
+        def done(current):
+            if switches != self._switches:
+                return  # a switch happened meanwhile; its result is newer
+            for name, cur in current.items():
+                ids = {p.id for p in self.store.profiles if p.adapter == name and p.matches(cur)}
+                # Profiles with identical settings (e.g. several DHCP ones) all match.
+                if self.store.last_applied in ids:
+                    ids = {self.store.last_applied}
+                self.active[name] = ids
+            self.refresh_list()
+
+        if names:
+            run_async(read_all, on_done=done)
+
+    def _choose_adapter(self, title: str) -> str | None:
+        if not self.adapters:
+            QMessageBox.information(self, APP_NAME, "No network adapters found yet. Try Profile → Refresh adapters.")
+            return None
+        labels = [a.label for a in self.adapters]
+        label, ok = QInputDialog.getItem(self, title, "Adapter:", labels, 0, False)
+        return self.adapters[labels.index(label)].name if ok else None
 
     # ---- profile CRUD ---------------------------------------------------------------
 
@@ -317,16 +380,9 @@ class MainWindow(QMainWindow):
             self.refresh_list(p.id)
 
     def new_from_current(self):
-        if not self.adapters:
-            QMessageBox.information(self, APP_NAME, "No network adapters found yet. Try Profile → Refresh adapters.")
+        adapter = self._choose_adapter("New from current settings")
+        if not adapter:
             return
-        from PySide6.QtWidgets import QInputDialog
-
-        labels = [a.label for a in self.adapters]
-        label, ok = QInputDialog.getItem(self, "New from current settings", "Adapter:", labels, 0, False)
-        if not ok:
-            return
-        adapter = self.adapters[labels.index(label)].name
         self.setCursor(Qt.BusyCursor)
 
         def done(current: Profile):
@@ -375,12 +431,38 @@ class MainWindow(QMainWindow):
     def apply_selected(self):
         self.apply_profile(self._selected())
 
-    def apply_profile(self, p: Profile | None):
+    def apply_selected_on(self):
+        p = self._selected()
+        if p and (adapter := self._choose_adapter(f"Activate '{p.name}' on")):
+            self.apply_profile(p, adapter)
+
+    def apply_profile(self, p: Profile | None, adapter: str | None = None):
+        """Apply ``p`` to ``adapter``, or to the profile's own adapter (asking if it has none)."""
         if not p or self._busy:
             return
-        if not p.adapter:
-            QMessageBox.warning(self, APP_NAME, f"Profile '{p.name}' has no adapter set. Edit it first.")
+        adapter = adapter or p.adapter or self._choose_adapter(f"Activate '{p.name}' on")
+        if not adapter:
             return
+
+        def activated():
+            self.store.last_applied = p.id
+            self.active[adapter] = {p.id}
+
+        self._switch(p, adapter, f"'{p.name}'", activated)
+
+    def undo_last(self):
+        if not self._undo or self._busy:
+            return
+        before, adapter, last_applied, active = self._undo
+
+        def restored():
+            self.store.last_applied = last_applied
+            self.active[adapter] = active
+
+        self._switch(before, adapter, "the previous settings", restored)
+
+    def _switch(self, p: Profile, adapter: str, what: str, on_success):
+        """Apply ``p`` in the background, remembering the old settings for undo."""
         if self.backend.needs_elevation():
             if QMessageBox.question(
                 self, APP_NAME,
@@ -389,29 +471,45 @@ class MainWindow(QMainWindow):
                 self.restart_elevated()
             return
         self._set_busy(True)
-        self.log_line(f"Activating '{p.name}' on {p.adapter}…")
+        self.log_line(f"Activating {what} on {adapter}…")
+        prev_last, prev_active = self.store.last_applied, set(self.active.get(adapter, set()))
+        profile = copy.deepcopy(p)
 
-        def done(log):
+        def switch():
+            try:
+                before = self.backend.read_config(adapter)
+                before.name = f"Settings before {what}"
+                before.validate()
+            except Exception:  # noqa: BLE001 - no undo then, but still switch
+                before = None
+            return before, self.backend.apply(profile, adapter)
+
+        def done(result):
+            before, log = result
             for line in log:
                 self.log_line(line)
-            self.store.last_applied = p.id
+            self._switches += 1
+            self._undo = (before, adapter, prev_last, prev_active) if before else None
+            on_success()
             self.store.save()
             self._set_busy(False)
             self.refresh_list()
-            self.log_line(f"✔ '{p.name}' is active.")
-            self.statusBar().showMessage(f"Activated '{p.name}'", 5000)
+            self.log_line(f"✔ Activated {what}." + ("" if before else " (Undo not available: could not read the old settings.)"))
+            self.statusBar().showMessage(f"Activated {what}", 5000)
             if self.tray and not self.isVisible():
-                self.tray.showMessage(APP_NAME, f"Activated '{p.name}'", QSystemTrayIcon.Information, 3000)
+                self.tray.showMessage(APP_NAME, f"Activated {what}", QSystemTrayIcon.Information, 3000)
+            run_async(self.backend.check_gateway, profile, adapter, on_done=self.log_line,
+                      on_error=lambda msg: self.log_line(f"Connection check failed: {msg}"))
 
         def failed(msg):
             self._set_busy(False)
             self.log_line(f"✘ Failed: {msg}")
             if self.tray and not self.isVisible():
-                self.tray.showMessage(APP_NAME, f"Failed to activate '{p.name}'", QSystemTrayIcon.Critical, 5000)
+                self.tray.showMessage(APP_NAME, f"Failed to activate {what}", QSystemTrayIcon.Critical, 5000)
             else:
-                QMessageBox.critical(self, APP_NAME, f"Could not activate '{p.name}':\n\n{msg}")
+                QMessageBox.critical(self, APP_NAME, f"Could not activate {what}:\n\n{msg}")
 
-        run_async(self.backend.apply, copy.deepcopy(p), on_done=done, on_error=failed)
+        run_async(switch, on_done=done, on_error=failed)
 
     def preview_selected(self):
         p = self._selected()
@@ -428,6 +526,10 @@ class MainWindow(QMainWindow):
         self._busy = busy
         self.apply_btn.setText("Activating…" if busy else "Activate")
         self.setCursor(Qt.BusyCursor) if busy else self.unsetCursor()
+        can_undo = self._undo is not None and not busy
+        self.undo_btn.setEnabled(can_undo)
+        self.undo_action.setEnabled(can_undo)
+        self.undo_btn.setToolTip(f"Restore: {self._undo[0].summary()}" if self._undo else "")
         self._update_details()
         self._rebuild_tray_menu()
 

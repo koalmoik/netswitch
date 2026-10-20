@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
 from ..models import Profile
@@ -42,7 +44,8 @@ class Command:
         return self.raw or subprocess.list2cmdline(self.args)
 
 
-def run(cmd: list[str] | str, encoding: str = "utf-8", timeout: int = 60) -> subprocess.CompletedProcess:
+def run(cmd: list[str] | str, encoding: str = "utf-8", timeout: int = 60,
+        env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     kwargs = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -53,6 +56,7 @@ def run(cmd: list[str] | str, encoding: str = "utf-8", timeout: int = 60) -> sub
             encoding=encoding,
             errors="replace",
             timeout=timeout,
+            env=env,
             **kwargs,
         )
     except FileNotFoundError as e:
@@ -75,8 +79,43 @@ class Backend:
     def build_commands(self, profile: Profile, adapter: str) -> list[Command]:
         raise NotImplementedError
 
+    def ping_command(self, host: str) -> list[str]:
+        raise NotImplementedError
+
     def needs_elevation(self) -> bool:
         return False
+
+    def ping(self, host: str) -> bool:
+        try:
+            ipaddress.IPv4Address(host)  # never hand anything but an address to ping
+        except ValueError:
+            return False
+        res = run(self.ping_command(host), encoding=self.output_encoding, timeout=10)
+        # Windows ping exits 0 even for "destination unreachable"; a real reply has a TTL.
+        return res.returncode == 0 and "ttl=" in res.stdout.lower()
+
+    def check_gateway(self, profile: Profile, adapter: str, wait: float = 10) -> str:
+        """Ping the gateway after a switch. Returns a line for the log."""
+        if profile.ip_mode == "static" and not profile.gateway:
+            return "No gateway configured – skipped the connection check."
+        deadline = time.monotonic() + wait
+        while True:
+            # With DHCP the gateway is only known once a lease has arrived.
+            gateway = profile.gateway if profile.ip_mode == "static" else self._current_gateway(adapter)
+            if gateway and self.ping(gateway):
+                return f"✔ Gateway {gateway} is reachable."
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(1)
+        if not gateway:
+            return "⚠ No gateway received via DHCP (yet)."
+        return f"⚠ Gateway {gateway} does not answer ping (some routers ignore ping)."
+
+    def _current_gateway(self, adapter: str) -> str:
+        try:
+            return self.read_config(adapter).gateway
+        except BackendError:
+            return ""
 
     def apply(self, profile: Profile, adapter: str | None = None) -> list[str]:
         """Apply ``profile``. Returns a log of executed commands and their output."""

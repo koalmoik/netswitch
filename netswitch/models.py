@@ -60,6 +60,20 @@ class Profile:
         dns = "auto" if self.dns_mode == "dhcp" else (", ".join(self.dns_servers) or "none")
         return f"{ip} | DNS: {dns}"
 
+    def matches(self, current: "Profile") -> bool:
+        """True if ``current`` (an adapter's live settings, see ``read_config``) fits this profile."""
+        if self.ip_mode != current.ip_mode:
+            return False
+        if self.ip_mode == "static" and (self.ip_address, self.prefix_length, self.gateway) != (
+            current.ip_address, current.prefix_length, current.gateway
+        ):
+            return False
+        return self.static_dns == current.static_dns
+
+    @property
+    def static_dns(self) -> list[str]:
+        return self.dns_servers if self.dns_mode == "static" else []
+
     def validate(self) -> None:
         if not self.name.strip():
             raise ValidationError("Name must not be empty")

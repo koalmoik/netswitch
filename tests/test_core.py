@@ -129,3 +129,87 @@ def test_linux_commands(monkeypatch):
     mod, _ = b.build_commands(Profile(name="Home"), "enp3s0")
     assert mod.args[5:] == ["ipv4.method", "auto", "ipv4.addresses", "", "ipv4.gateway", "",
                             "ipv4.dns", "", "ipv4.ignore-auto-dns", "no"]
+
+
+# ---- PowerShell input ------------------------------------------------------------
+
+def test_windows_read_config_passes_adapter_via_env(monkeypatch):
+    import subprocess
+
+    from netswitch.backends import windows
+
+    seen = {}
+
+    def fake_run(cmd, encoding="utf-8", timeout=60, env=None):
+        seen["script"], seen["env"] = cmd[-1], env
+        out = json.dumps({"Dhcp": "Enabled", "IP": "10.0.0.5", "Prefix": 24, "Gateway": "10.0.0.1",
+                          "Dns": ["10.0.0.1"], "StaticDns": ""})
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(windows, "run", fake_run)
+    evil = "Eth\u2019; Remove-Item C:\\x; \u2018"  # curly quotes count as quotes in PowerShell
+    p = WindowsBackend().read_config(evil)
+    assert evil not in seen["script"]
+    assert seen["env"]["NETSWITCH_ADAPTER"] == evil
+    assert p.adapter == evil and p.gateway == "10.0.0.1"
+
+
+# ---- active profile detection ----------------------------------------------------
+
+def test_matches():
+    current = static_profile(name="Ethernet 2 (current)")
+    assert static_profile().matches(current)
+    assert not static_profile(ip_address="192.168.10.51").matches(current)
+    assert not static_profile(dns_servers=["1.1.1.1"]).matches(current)
+    assert not Profile(name="Home").matches(current)
+    # DHCP: the live address doesn't matter, only the modes and static DNS
+    live = Profile(name="x", ip_address="10.1.2.3", gateway="10.1.2.1", dns_servers=["10.1.2.1"])
+    assert Profile(name="Home").matches(live)
+    assert not Profile(name="Home", dns_mode="static", dns_servers=["1.1.1.1"]).matches(live)
+
+
+# ---- connection check ------------------------------------------------------------
+
+def test_check_gateway(monkeypatch):
+    b = LinuxBackend()
+    pinged = []
+    monkeypatch.setattr(b, "ping", lambda host: pinged.append(host) or host == "192.168.10.1")
+    assert "reachable" in b.check_gateway(static_profile(), "enp3s0", wait=0)
+    assert "does not answer" in b.check_gateway(static_profile(gateway="192.168.10.254"), "enp3s0", wait=0)
+    assert "skipped" in b.check_gateway(static_profile(gateway=""), "enp3s0", wait=0)
+
+    monkeypatch.setattr(b, "read_config", lambda dev: Profile(name="x", gateway="192.168.10.1"))
+    assert "reachable" in b.check_gateway(Profile(name="Home"), "enp3s0", wait=0)
+    monkeypatch.setattr(b, "read_config", lambda dev: Profile(name="x"))
+    assert "No gateway" in b.check_gateway(Profile(name="Home"), "enp3s0", wait=0)
+
+
+def test_ping_only_accepts_addresses(monkeypatch):
+    from netswitch.backends import base
+
+    monkeypatch.setattr(base, "run", lambda *a, **k: pytest.fail("ping must not run"))
+    assert not LinuxBackend().ping("-f")
+
+
+# ---- CLI ---------------------------------------------------------------------------
+
+def test_cli_apply_with_adapter(tmp_path, monkeypatch, capsys):
+    import netswitch.backends
+    from netswitch.__main__ import main
+
+    applied = []
+
+    class FakeBackend:
+        def apply(self, profile, adapter=None):
+            applied.append((profile.name, adapter))
+            return []
+
+    monkeypatch.setattr(netswitch.backends, "get_backend", FakeBackend)
+    path = tmp_path / "p.json"
+    store = ProfileStore(path)
+    store.upsert(Profile(name="Home"))  # no adapter saved
+
+    assert main(["--profiles", str(path), "--apply", "home"]) == 2
+    assert "--adapter" in capsys.readouterr().err
+    assert main(["--profiles", str(path), "--apply", "home", "--adapter", "wlan0"]) == 0
+    assert applied == [("Home", "wlan0")]

@@ -8,15 +8,12 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 
 from ..models import Profile
 from .base import Adapter, Backend, BackendError, Command, run
 
 PS_PREFIX = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$ErrorActionPreference='Stop';"
-
-
-def ps_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
 def netsh_quote(value: str) -> str:
@@ -25,10 +22,16 @@ def netsh_quote(value: str) -> str:
     return f'"{value}"'
 
 
-def powershell_json(script: str):
+def powershell_json(script: str, **env: str):
+    """Run ``script`` and parse its JSON output.
+
+    Values go in as environment variables (``$env:NAME``) rather than being quoted into the
+    script, so nothing in them is ever parsed as PowerShell code.
+    """
     res = run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-Command", PS_PREFIX + script]
+         "-Command", PS_PREFIX + script],
+        env={**os.environ, **env} if env else None,
     )
     if res.returncode != 0:
         raise BackendError(f"PowerShell failed:\n{res.stderr.strip() or res.stdout.strip()}")
@@ -61,28 +64,30 @@ class WindowsBackend(Backend):
             for d in data
         ]
 
+    def ping_command(self, host: str) -> list[str]:
+        return ["ping", "-n", "1", "-w", "1000", host]
+
     def read_config(self, adapter: str) -> Profile:
-        a = ps_quote(adapter)
-        script = f"""
-$a = {a}
+        script = """
+$a = $env:NETSWITCH_ADAPTER
 $na = Get-NetAdapter -Name $a
 $ipi = Get-NetIPInterface -InterfaceAlias $a -AddressFamily IPv4
 $ip = @(Get-NetIPAddress -InterfaceAlias $a -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object {{ $_.PrefixOrigin -ne 'WellKnown' }})[0]
+        Where-Object { $_.PrefixOrigin -ne 'WellKnown' })[0]
 $gw = @(Get-NetRoute -InterfaceAlias $a -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
         Sort-Object RouteMetric)[0]
 $dns = (Get-DnsClientServerAddress -InterfaceAlias $a -AddressFamily IPv4).ServerAddresses
 $reg = Get-ItemProperty -Path ("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\" + $na.InterfaceGuid) -ErrorAction SilentlyContinue
-[pscustomobject]@{{
+[pscustomobject]@{
   Dhcp      = [string]$ipi.Dhcp
   IP        = $ip.IPAddress
   Prefix    = $ip.PrefixLength
   Gateway   = $gw.NextHop
   Dns       = @($dns)
   StaticDns = [string]$reg.NameServer
-}} | ConvertTo-Json -Compress
+} | ConvertTo-Json -Compress
 """
-        d = powershell_json(script)
+        d = powershell_json(script, NETSWITCH_ADAPTER=adapter)
         if not d:
             raise BackendError(f"Could not read configuration of '{adapter}'")
         gateway = d.get("Gateway") or ""

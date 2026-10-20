@@ -3,6 +3,8 @@
     netswitch                      open the GUI
     netswitch --list               list saved profiles
     netswitch --apply "Office"     apply a profile without opening the GUI
+    netswitch --apply "Office" --adapter "Ethernet 2"
+                                   ... on another adapter than the one saved in the profile
     netswitch --export out.json    export all profiles
     netswitch --import in.json     import profiles
 """
@@ -25,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="netswitch", description="Network profile switcher")
     parser.add_argument("--list", action="store_true", help="list saved profiles")
     parser.add_argument("--apply", metavar="NAME", help="apply the profile with this name")
+    parser.add_argument("--adapter", metavar="NAME", help="with --apply: use this adapter instead of the profile's")
     parser.add_argument("--export", metavar="FILE", type=Path, help="export all profiles to FILE")
     parser.add_argument("--import", dest="import_", metavar="FILE", type=Path, help="import profiles from FILE")
     parser.add_argument("--overwrite", action="store_true", help="with --import: replace profiles with the same name")
@@ -32,6 +35,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--minimized", action="store_true", help="start the GUI hidden in the tray")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
+    if args.adapter and not args.apply:
+        parser.error("--adapter can only be used with --apply")
 
     from .storage import ProfileStore
 
@@ -65,7 +70,10 @@ def run_cli(store, args) -> int:
         if not match:
             print(f"No profile named '{args.apply}'", file=sys.stderr)
             return 2
-        for line in get_backend().apply(match[0]):
+        if not (args.adapter or match[0].adapter):
+            print(f"Profile '{match[0].name}' has no adapter set; pass --adapter NAME", file=sys.stderr)
+            return 2
+        for line in get_backend().apply(match[0], args.adapter):
             print(line)
         store.last_applied = match[0].id
         store.save()

@@ -30,6 +30,9 @@ def nmcli(*args: str) -> str:
 class LinuxBackend(Backend):
     name = "linux"
 
+    def ping_command(self, host: str) -> list[str]:
+        return ["ping", "-c", "1", "-W", "1", host]
+
     def list_adapters(self) -> list[Adapter]:
         adapters = []
         for line in nmcli("-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status").splitlines():
