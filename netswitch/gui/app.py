@@ -23,6 +23,8 @@ from .editor import ProfileDialog
 from .worker import run_async
 
 FILE_FILTER = "NetSwitch profiles (*.json);;All files (*)"
+IMPORT_FILTER = ("Profiles (*.json *.xml);;NetSwitch profiles (*.json);;"
+                 "NetSetMan export (*.xml);;All files (*)")
 
 
 def make_icon(color: str = "#2e7dd7") -> QIcon:
@@ -539,7 +541,7 @@ class MainWindow(QMainWindow):
     # ---- import / export --------------------------------------------------------------
 
     def import_profiles(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import profiles", str(Path.home()), FILE_FILTER)
+        path, _ = QFileDialog.getOpenFileName(self, "Import profiles", str(Path.home()), IMPORT_FILTER)
         if not path:
             return
         box = QMessageBox(self)
@@ -552,12 +554,15 @@ class MainWindow(QMainWindow):
         if box.clickedButton() == box.button(QMessageBox.Cancel):
             return
         try:
-            added, replaced = self.store.import_from(Path(path), overwrite=box.clickedButton() == replace)
+            added, replaced, skipped = self.store.import_from(Path(path), overwrite=box.clickedButton() == replace)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Import failed", f"Could not import {path}:\n\n{e}")
             return
         self.refresh_list()
+        self.detect_active()
         msg = f"Imported {added} new profile(s)" + (f", replaced {replaced}" if replaced else "") + "."
+        if skipped:
+            msg += "\n\nSkipped:\n" + "\n".join(f"• {reason}" for reason in skipped)
         self.log_line(msg)
         QMessageBox.information(self, "Import profiles", msg)
 

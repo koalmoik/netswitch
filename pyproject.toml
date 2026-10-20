@@ -1,6 +1,6 @@
 [project]
 name = "netswitch"
-version = "0.2.0"
+version = "0.3.0"
 description = "Save network profiles (IP, gateway, DNS) and switch between them quickly"
 requires-python = ">=3.10"
 dependencies = ["PySide6>=6.5"]

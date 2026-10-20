@@ -29,7 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", metavar="NAME", help="apply the profile with this name")
     parser.add_argument("--adapter", metavar="NAME", help="with --apply: use this adapter instead of the profile's")
     parser.add_argument("--export", metavar="FILE", type=Path, help="export all profiles to FILE")
-    parser.add_argument("--import", dest="import_", metavar="FILE", type=Path, help="import profiles from FILE")
+    parser.add_argument("--import", dest="import_", metavar="FILE", type=Path,
+                        help="import profiles from FILE (NetSwitch .json or NetSetMan .xml export)")
     parser.add_argument("--overwrite", action="store_true", help="with --import: replace profiles with the same name")
     parser.add_argument("--profiles", metavar="FILE", type=Path, help="use an alternative profiles file")
     parser.add_argument("--minimized", action="store_true", help="start the GUI hidden in the tray")
@@ -55,8 +56,10 @@ def main(argv: list[str] | None = None) -> int:
 
 def run_cli(store, args) -> int:
     if args.import_:
-        added, replaced = store.import_from(args.import_, overwrite=args.overwrite)
+        added, replaced, skipped = store.import_from(args.import_, overwrite=args.overwrite)
         print(f"Imported {added} new, replaced {replaced} profile(s).")
+        for reason in skipped:
+            print(f"Skipped {reason}")
     if args.export:
         n = store.export_to(args.export)
         print(f"Exported {n} profile(s) to {args.export}")

@@ -63,12 +63,12 @@ def test_export_import(tmp_path):
 
     dst = ProfileStore(tmp_path / "b.json")
     dst.upsert(Profile(name="office"))  # name clash (case-insensitive)
-    added, replaced = dst.import_from(out)
+    added, replaced, _ = dst.import_from(out)
     assert (added, replaced) == (2, 0)
     assert [p.name for p in dst.profiles] == ["office", "Office (2)", "Home"]
     assert len({p.id for p in dst.profiles}) == 3
 
-    added, replaced = dst.import_from(out, overwrite=True)
+    added, replaced, _ = dst.import_from(out, overwrite=True)
     assert replaced == 2 and added == 0
     assert dst.profiles[0].ip_mode == "static"
 
@@ -77,9 +77,9 @@ def test_import_bare_list_and_single(tmp_path):
     f = tmp_path / "x.json"
     f.write_text(json.dumps([{"name": "A"}, {"name": "B"}]))
     store = ProfileStore(tmp_path / "s.json")
-    assert store.import_from(f) == (2, 0)
+    assert store.import_from(f) == (2, 0, [])
     f.write_text(json.dumps({"name": "C"}))
-    assert store.import_from(f) == (1, 0)
+    assert store.import_from(f) == (1, 0, [])
 
 
 # ---- Windows commands ------------------------------------------------------------
@@ -213,3 +213,70 @@ def test_cli_apply_with_adapter(tmp_path, monkeypatch, capsys):
     assert "--adapter" in capsys.readouterr().err
     assert main(["--profiles", str(path), "--apply", "home", "--adapter", "wlan0"]) == 0
     assert applied == [("Home", "wlan0")]
+
+
+# ---- NetSetMan import --------------------------------------------------------------
+
+NETSETMAN_XML = """﻿<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<NetSetMan version="5.0.6">
+  <Profiles>
+    <Group name="Gruppe">
+      <Profile name="Automatische IP">
+        <Settings>
+          <Nic name="Ethernet">{DCF018F7}</Nic>
+          <Setting name="IP" id="11" set="True" dhcp="True"/>
+        </Settings>
+      </Profile>
+      <Profile name="MRBTS">
+        <Settings>
+          <Nic name="Ethernet">{DCF018F7}</Nic>
+          <Setting name="IP" id="11" set="True" dhcp="False"><Item prefix="25">192.168.255.130</Item></Setting>
+          <Setting name="Gateway" id="12" set="False"><Item>192.168.255.129</Item></Setting>
+        </Settings>
+      </Profile>
+      <Profile name="Office">
+        <Settings>
+          <Nic name="LAN">{58368E84}</Nic>
+          <Setting name="IP" id="11" set="True" dhcp="False"><Item prefix="24">10.0.0.5</Item></Setting>
+          <Setting name="Gateway" id="12" set="True"><Item>10.0.0.1</Item></Setting>
+          <Setting name="DNS" id="13" set="True" dhcp="False"><Item>10.0.0.1</Item><Item>1.1.1.1</Item></Setting>
+        </Settings>
+      </Profile>
+      <Profile name="SRAN FPRx">
+        <Settings>
+          <Nic name="Ethernet">{58368E84}</Nic>
+          <Setting name="IP" id="11" set="True" dhcp="False"/>
+        </Settings>
+      </Profile>
+      <Profile name="Only DNS">
+        <Settings>
+          <Setting name="DNS" id="13" set="True" dhcp="True"/>
+        </Settings>
+      </Profile>
+    </Group>
+  </Profiles>
+</NetSetMan>
+"""
+
+
+def test_import_netsetman(tmp_path):
+    f = tmp_path / "netsetman.xml"
+    f.write_text(NETSETMAN_XML, encoding="utf-8")
+    store = ProfileStore(tmp_path / "s.json")
+    added, replaced, skipped = store.import_from(f)
+    assert (added, replaced) == (3, 0)
+    assert skipped == ["SRAN FPRx: static IP without an address", "Only DNS: does not change the IP settings"]
+
+    auto, mrbts, office = store.profiles
+    assert (auto.adapter, auto.ip_mode, auto.dns_mode) == ("Ethernet", "dhcp", "dhcp")
+    assert (mrbts.ip_address, mrbts.prefix_length, mrbts.gateway) == ("192.168.255.130", 25, "")
+    assert (mrbts.dns_mode, mrbts.dns_servers) == ("static", [])
+    assert "192.168.255.129" in mrbts.notes  # the disabled gateway is kept for reference
+    assert (office.adapter, office.gateway, office.dns_servers) == ("LAN", "10.0.0.1", ["10.0.0.1", "1.1.1.1"])
+
+
+def test_import_rejects_other_xml(tmp_path):
+    f = tmp_path / "other.xml"
+    f.write_text("<Something/>", encoding="utf-8")
+    with pytest.raises(ValidationError, match="not a NetSetMan export"):
+        ProfileStore(tmp_path / "s.json").import_from(f)

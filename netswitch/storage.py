@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from .models import SCHEMA_VERSION, Profile, ValidationError
+from .netsetman import looks_like_xml, parse_netsetman
 
 APP_NAME = "NetSwitch"
 
@@ -104,15 +105,20 @@ class ProfileStore:
         _atomic_write(Path(path), _dump(chosen))
         return len(chosen)
 
-    def import_from(self, path: Path, overwrite: bool = False) -> tuple[int, int]:
-        """Import profiles from a file.
+    def import_from(self, path: Path, overwrite: bool = False) -> tuple[int, int, list[str]]:
+        """Import profiles from a NetSwitch JSON file or a NetSetMan XML export.
 
         Profiles whose name matches an existing one are replaced when
         ``overwrite`` is True, otherwise they are added with a numbered suffix.
-        Returns ``(added, replaced)``.
+        Returns ``(added, replaced, skipped)``; ``skipped`` explains each profile
+        that could not be imported.
         """
-        with open(path, encoding="utf-8") as f:
-            incoming = parse_profiles(json.load(f))
+        raw = Path(path).read_bytes()
+        skipped: list[str] = []
+        if looks_like_xml(raw):
+            incoming, skipped = parse_netsetman(raw)
+        else:
+            incoming = parse_profiles(json.loads(raw.decode("utf-8-sig")))
         added = replaced = 0
         by_name = {p.name.casefold(): p for p in self.profiles}
         for prof in incoming:
@@ -130,7 +136,7 @@ class ProfileStore:
                 by_name[prof.name.casefold()] = prof
                 added += 1
         self.save()
-        return added, replaced
+        return added, replaced, skipped
 
     def _unique_name(self, name: str) -> str:
         taken = {p.name.casefold() for p in self.profiles}

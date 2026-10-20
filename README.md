@@ -18,6 +18,7 @@ Windows is the main target; Linux works through NetworkManager (`nmcli`).
 - Profiles matching an adapter's current settings are marked active, also after a restart
 - Tray icon: switch profiles without opening the window; closing the window keeps it in the tray
 - Import/export all or single profiles (JSON). When names clash on import you can replace or keep both
+- Import NetSetMan exports (`.xml` from NetSetMan → File → Export) directly
 - Drag and drop to reorder profiles
 - *Show commands* previews exactly what will be executed
 - CLI for scripts and desktop shortcuts
@@ -58,6 +59,7 @@ netswitch --apply "Office"
 netswitch --apply "Office" --adapter "Ethernet 2"   # on another adapter
 netswitch --export backup.json
 netswitch --import backup.json [--overwrite]
+netswitch --import netsetman.xml          # NetSetMan export
 netswitch --minimized            # start in the tray
 ```
 
